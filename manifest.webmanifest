@@ -1,0 +1,16 @@
+{
+  "name": "Hint Laundry & Dry Cleaners",
+  "short_name": "Hint Laundry",
+  "description": "Staff app for Hint Laundry & Dry Cleaners, Oshikuku — orders, payments, slips and receipts.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#F1F5F9",
+  "theme_color": "#2563EB",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

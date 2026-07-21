@@ -210,6 +210,7 @@ const fillTpl = (tpl, o, st) => tpl
   .replace(/{balance}/g, balanceOf(o) > 0 ? `Balance due: *${fmt(balanceOf(o))}*. ` : "It is fully paid. ");
 const readyText = (o, st) => fillTpl(st.readyMsg, o, st);
 const overdueText = (o, st) => fillTpl(st.overdueMsg, o, st);
+const owingText = (o, st) => `Hi ${o.customerName}, this is ${st.shopName}. A balance of *${fmt(balanceOf(o))}* is still owing on laundry order ${o.id}. Please settle it on your next visit. Thank you!`;
 
 /* ------------------------------------------------------------------ */
 
@@ -239,6 +240,12 @@ function LaundryApp() {
     toastTimer.current = setTimeout(() => setToast(null), 3400);
   };
   useEffect(() => () => clearTimeout(toastTimer.current), []);
+
+  /* Confirmation dialog for destructive actions.
+     requireText makes the user type a word (e.g. RESET) before the button enables. */
+  const [confirmBox, setConfirmBox] = useState(null); // { title, body, confirmLabel, danger, requireText, onConfirm }
+  const [confirmText, setConfirmText] = useState("");
+  const askConfirm = (cfg) => { setConfirmText(""); setConfirmBox(cfg); };
 
   const [printing, setPrinting] = useState(null);   // { type: 'slip'|'receipt', orderId }
   const [edit, setEdit] = useState(null);           // edit-order draft
@@ -279,7 +286,7 @@ function LaundryApp() {
     return () => clearTimeout(t);
   }, [loaded, customers, orders, services, users, settings, lastBackupTs]);
 
-  const resetAllData = async () => {
+  const doResetAllData = async () => {
     try { await appStorage.delete(STORAGE_KEY); } catch (e) {}
     setCustomers(seedCustomers);
     setOrders(seedOrders);
@@ -290,6 +297,14 @@ function LaundryApp() {
     orderSeq = 1043;
     flash("All data reset to the demo starting point.");
   };
+  const resetAllData = () => askConfirm({
+    title: "Reset all data?",
+    body: `This permanently deletes every order (${orders.length}), customer (${customers.length}), payment and setting on this device and restores the demo data. This cannot be undone.`,
+    requireText: "RESET",
+    confirmLabel: "Delete everything",
+    danger: true,
+    onConfirm: doResetAllData,
+  });
 
   /* ---------- backup & restore ---------- */
   const backupData = (auto = false) => {
@@ -303,23 +318,33 @@ function LaundryApp() {
     setLastBackupTs(Date.now());
     flash(auto ? "Daily auto-backup downloaded — keep the file safe." : "Backup file downloaded — keep it somewhere safe.");
   };
+  const applyRestore = (s) => {
+    setCustomers(s.customers);
+    setOrders(s.orders);
+    setServices(s.services);
+    if (Array.isArray(s.users) && s.users.length > 0) setUsers(s.users);
+    if (s.settings && typeof s.settings === "object") setSettings({ ...DEFAULT_SETTINGS, ...s.settings });
+    const maxOrder = s.orders.reduce((m, o) => {
+      const n = parseInt(String(o.id).replace(/\D/g, ""), 10);
+      return isNaN(n) ? m : Math.max(m, n);
+    }, 1042);
+    orderSeq = maxOrder + 1;
+    flash("Backup restored.");
+  };
   const restoreData = (file) => {
     const reader = new FileReader();
     reader.onload = () => {
       try {
         const s = JSON.parse(reader.result);
         if (!Array.isArray(s.customers) || !Array.isArray(s.orders) || !Array.isArray(s.services)) throw new Error("bad file");
-        setCustomers(s.customers);
-        setOrders(s.orders);
-        setServices(s.services);
-        if (Array.isArray(s.users) && s.users.length > 0) setUsers(s.users);
-        if (s.settings && typeof s.settings === "object") setSettings({ ...DEFAULT_SETTINGS, ...s.settings });
-        const maxOrder = s.orders.reduce((m, o) => {
-          const n = parseInt(String(o.id).replace(/\D/g, ""), 10);
-          return isNaN(n) ? m : Math.max(m, n);
-        }, 1042);
-        orderSeq = maxOrder + 1;
-        flash("Backup restored.");
+        const when = s.exportedAt ? dateLabel(s.exportedAt) : "an unknown date";
+        askConfirm({
+          title: "Restore this backup?",
+          body: `The backup "${file.name}" from ${when} contains ${s.orders.length} orders and ${s.customers.length} customers. It will replace everything currently in the app (${orders.length} orders, ${customers.length} customers).`,
+          confirmLabel: "Replace with backup",
+          danger: true,
+          onConfirm: () => applyRestore(s),
+        });
       } catch (e) {
         flash("That file doesn't look like a Hint Laundry backup.");
       }
@@ -346,9 +371,18 @@ function LaundryApp() {
   };
   const removeService = (id) => {
     const s = services.find((x) => x.id === id);
-    setServices((sv) => sv.filter((x) => x.id !== id));
-    setCart((c) => { const n = { ...c }; delete n[id]; return n; });
-    if (s) flash(`${s.name} removed. Existing orders keep it on their slips.`);
+    if (!s) return;
+    askConfirm({
+      title: `Remove ${s.name}?`,
+      body: "It disappears from the price list for new orders. Existing orders keep it on their slips.",
+      confirmLabel: "Remove item",
+      danger: true,
+      onConfirm: () => {
+        setServices((sv) => sv.filter((x) => x.id !== id));
+        setCart((c) => { const n = { ...c }; delete n[id]; return n; });
+        flash(`${s.name} removed. Existing orders keep it on their slips.`);
+      },
+    });
   };
 
   /* ---------- price list: Excel import & export ---------- */
@@ -466,9 +500,33 @@ function LaundryApp() {
     if (u.role === "admin" && users.filter((x) => x.role === "admin").length <= 1) {
       flash("There must always be at least one owner."); return;
     }
-    setUsers((us) => us.filter((x) => x.id !== id));
-    flash(`${u.name} removed.`);
+    askConfirm({
+      title: `Remove ${u.name}?`,
+      body: "They will no longer be able to sign in. Orders they handled keep their name on record.",
+      confirmLabel: "Remove person",
+      danger: true,
+      onConfirm: () => {
+        setUsers((us) => us.filter((x) => x.id !== id));
+        flash(`${u.name} removed.`);
+      },
+    });
   };
+  /* Edit a person's name or PIN in place (no more remove-and-re-add). */
+  const [userEdit, setUserEdit] = useState(null); // { id, name, pin }
+  const [showPins, setShowPins] = useState(false);
+  const saveUserEdit = () => {
+    if (!userEdit) return;
+    const name = userEdit.name.trim();
+    const pin = userEdit.pin.trim();
+    if (!name) { flash("Give the person a name."); return; }
+    if (!/^\d{4,6}$/.test(pin)) { flash("PIN must be 4–6 digits."); return; }
+    if (users.some((u) => u.pin === pin && u.id !== userEdit.id)) { flash("That PIN is already taken — pick a different one."); return; }
+    setUsers((us) => us.map((u) => u.id === userEdit.id ? { ...u, name, pin } : u));
+    if (userEdit.id === currentUserId) setCurrentStaff(name);
+    setUserEdit(null);
+    flash(`Saved — ${name} signs in with the new PIN from now on.`);
+  };
+  const defaultPinsActive = users.some((u) => u.pin === ADMIN_PIN || u.pin === STAFF_PIN);
 
   /* ---------- new order ---------- */
   const [sel, setSel] = useState({ customerId: "", name: "", phone: "", address: "", newMode: false });
@@ -507,6 +565,7 @@ function LaundryApp() {
     setCart({}); setCustomLines([]); setExpress(false); setDiscount("");
     setNotes(""); setPayNow({ amount: "", method: settings.payMethods[0] });
     setCollect(computeCollection(new Date(), settings.turnaroundDays));
+    setTriedCreate(false);
     flash("Ticket cleared.");
   };
 
@@ -544,20 +603,37 @@ function LaundryApp() {
   const discountVal = Math.min(parseFloat(discount) || 0, subtotal + expressFee);
   const total = Math.max(0, subtotal + expressFee - discountVal);
 
-  const createOrder = () => {
-    if (cartLines.length === 0) { flash("Add at least one item."); return; }
-    let cust = customers.find((c) => c.id === sel.customerId);
+  /* Everything blocking order creation, listed for the inline checklist
+     (recomputed each render so problems disappear as staff fix them). */
+  const orderProblems = () => {
+    const probs = [];
+    if (cartLines.length === 0) probs.push("Add at least one item.");
+    if (!customers.find((c) => c.id === sel.customerId)) {
+      if (!sel.newMode) probs.push("Search for the customer above, or tap “Register new customer”.");
+      else {
+        if (!sel.name.trim()) probs.push("Enter the new customer's name.");
+        if (!sel.phone.trim()) probs.push("Enter the new customer's phone number.");
+        else if (!phoneLooksValid(sel.phone)) probs.push("Check the phone number — just the local number, e.g. 0813886676.");
+      }
+    }
+    return probs;
+  };
+  const [triedCreate, setTriedCreate] = useState(false);
+
+  const createOrder = (custOverride) => {
+    const probs = orderProblems();
+    if (probs.length > 0) { setTriedCreate(true); flash(probs[0]); return; }
+    let cust = custOverride || customers.find((c) => c.id === sel.customerId);
     if (!cust) {
-      if (!sel.newMode) {
-        flash("Search for the customer above, or tap “Register new customer”.");
-        return;
-      }
-      if (!sel.name.trim() || !sel.phone.trim()) {
-        flash("Enter the new customer's name and phone.");
-        return;
-      }
-      if (!phoneLooksValid(sel.phone)) {
-        flash("Check the phone number — just the local number, e.g. 0813886676.");
+      /* New registration: guard against a second record on the same number. */
+      const dupe = customers.find((c) => String(c.phone).replace(/\D/g, "") === normalizePhone(sel.phone));
+      if (dupe) {
+        askConfirm({
+          title: "Number already registered",
+          body: `${displayPhone(sel.phone)} belongs to ${dupe.name}. Use their existing record for this order? (If it's a different person, go back and check the number.)`,
+          confirmLabel: `Use ${dupe.name}`,
+          onConfirm: () => { pickCustomer(dupe); createOrder(dupe); },
+        });
         return;
       }
       cust = {
@@ -589,6 +665,7 @@ function LaundryApp() {
     setCustQuery("");
     setCollect(computeCollection(new Date(), settings.turnaroundDays));
     setPayNow({ amount: "", method: settings.payMethods[0] });
+    setTriedCreate(false);
     setPrinting({ type: "slip", orderId: id });
     flash(`Order ${id} created by ${currentStaff}.`);
   };
@@ -618,7 +695,7 @@ function LaundryApp() {
     setPrinting({ type: "receipt", orderId });
   };
 
-  const reversePayment = (orderId, index) => {
+  const doReversePayment = (orderId, index) => {
     setOrders((os) => os.map((o) => {
       if (o.id !== orderId) return o;
       const p = o.payments[index];
@@ -628,6 +705,38 @@ function LaundryApp() {
       return { ...o, payments };
     }));
     flash("Payment reversed — the correction is on the record.");
+  };
+  const reversePayment = (orderId, index) => {
+    const o = orders.find((x) => x.id === orderId);
+    const p = o && o.payments[index];
+    if (!p) return;
+    askConfirm({
+      title: "Reverse this payment?",
+      body: `${fmt(p.amount)} (${p.method}) on ${orderId} will get a correcting entry on the record. Do this only if the payment was recorded in error or refunded to the customer.`,
+      confirmLabel: "Reverse payment",
+      danger: true,
+      onConfirm: () => doReversePayment(orderId, index),
+    });
+  };
+
+  /* Undo a mis-tapped status: back one step, on the record.
+     Staff can step back within 15 minutes of the last change; the owner always can. */
+  const stepBackStatus = (orderId) => {
+    setOrders((os) => os.map((o) => {
+      if (o.id !== orderId || o.cancelled) return o;
+      const idx = STATUSES.indexOf(o.status);
+      if (idx <= 0) return o;
+      const prev = STATUSES[idx - 1];
+      return { ...o, status: prev, statusHistory: [...o.statusHistory, { status: prev, ts: Date.now(), by: currentStaff, back: true }] };
+    }));
+    flash("Stepped back one status — the correction is on the record.");
+  };
+  const canStepBack = (o) => {
+    const idx = STATUSES.indexOf(o.status);
+    if (idx <= 0 || o.cancelled) return false;
+    if (isAdmin) return true;
+    const last = o.statusHistory[o.statusHistory.length - 1];
+    return last && Date.now() - last.ts < 15 * 60000;
   };
 
   const confirmCancel = () => {
@@ -769,8 +878,10 @@ function LaundryApp() {
 
     const live = orders.filter((o) => !o.cancelled);
     const pOrders = live.filter((o) => (o.ts || 0) >= start);
+    /* Revenue counts payments on live orders only — a cancelled order's
+       payments are excluded (reverse them if the customer was refunded). */
     const collected = [];
-    orders.forEach((o) => o.payments.forEach((p) => { if ((p.ts || 0) >= start) collected.push(p); }));
+    live.forEach((o) => o.payments.forEach((p) => { if ((p.ts || 0) >= start) collected.push(p); }));
     const revenue = collected.reduce((a, p) => a + p.amount, 0);
     const byMethod = {};
     collected.forEach((p) => { byMethod[p.method] = (byMethod[p.method] || 0) + p.amount; });
@@ -810,13 +921,30 @@ function LaundryApp() {
     const ready = live.filter((o) => o.status === "Ready for collection");
     const dueToday = live.filter((o) => o.status !== DONE_STATUS && o.collectDate === today);
     const overdue = live.filter((o) => o.status !== DONE_STATUS && o.collectDate < today);
+    const owing = live.filter((o) => o.status === DONE_STATUS && balanceOf(o) > 0);
     let cashToday = 0;
-    orders.forEach((o) => o.payments.forEach((p) => { if ((p.ts || 0) >= st) cashToday += p.amount; }));
+    live.forEach((o) => o.payments.forEach((p) => { if ((p.ts || 0) >= st) cashToday += p.amount; }));
     const outstanding = live.reduce((a, o) => a + balanceOf(o), 0);
-    return { receivedToday, ready, dueToday, overdue, cashToday, outstanding };
+    return { receivedToday, ready, dueToday, overdue, owing, cashToday, outstanding };
   }, [orders]);
 
   const jumpToOrder = (id) => { setTab("orders"); setFilter("all"); setSearch(id); };
+
+  /* ---------- idle auto-lock (5 minutes without a touch or key) ---------- */
+  const lastActivity = useRef(Date.now());
+  useEffect(() => {
+    if (!unlocked) return;
+    lastActivity.current = Date.now();
+    const bump = () => { lastActivity.current = Date.now(); };
+    window.addEventListener("pointerdown", bump);
+    window.addEventListener("keydown", bump);
+    const iv = setInterval(() => {
+      if (Date.now() - lastActivity.current > 5 * 60000) {
+        setUnlocked(false); setCurrentStaff(""); setCurrentUserId(null);
+      }
+    }, 30000);
+    return () => { window.removeEventListener("pointerdown", bump); window.removeEventListener("keydown", bump); clearInterval(iv); };
+  }, [unlocked]);
 
   /* ---------- collections chart (last 14 days) ---------- */
   const chartDays = useMemo(() => {
@@ -825,7 +953,7 @@ function LaundryApp() {
       const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - i);
       days.push({ key: d.toDateString(), lbl: d.toLocaleDateString("en-GB", { day: "2-digit" }), amt: 0 });
     }
-    orders.forEach((o) => o.payments.forEach((p) => {
+    orders.filter((o) => !o.cancelled).forEach((o) => o.payments.forEach((p) => {
       const k = new Date(p.ts).toDateString();
       const day = days.find((x) => x.key === k);
       if (day) day.amt += p.amount;
@@ -868,7 +996,8 @@ function LaundryApp() {
             <h1 className="login-title">{settings.shopName}</h1>
             <p className="muted center-text">Enter your personal PIN to sign in</p>
             <div className="pin-row">
-              <input value={pinInput} inputMode="numeric" maxLength={6} placeholder="••••" className="pin-field" autoFocus
+              <input type="password" value={pinInput} inputMode="numeric" maxLength={6} placeholder="••••" className="pin-field" autoFocus
+                aria-label="Your personal PIN"
                 onChange={(e) => { setPinInput(e.target.value.replace(/\D/g, "")); setPinError(""); }}
                 onKeyDown={(e) => e.key === "Enter" && tryUnlock()} />
               <button className="btn-main" onClick={tryUnlock}>Sign in</button>
@@ -900,6 +1029,28 @@ function LaundryApp() {
               📲 Send on WhatsApp
             </a>
             <button className="btn-ghost" onClick={() => setPrinting(null)}>Close</button>
+          </div>
+        </div>
+      )}
+
+      {/* ---------- confirmation overlay ---------- */}
+      {confirmBox && (
+        <div className="print-overlay no-print" role="dialog" aria-modal="true" aria-label={confirmBox.title}>
+          <div className="edit-panel confirm-panel">
+            <h2>{confirmBox.title}</h2>
+            <p className="muted">{confirmBox.body}</p>
+            {confirmBox.requireText && (
+              <input value={confirmText} placeholder={`Type ${confirmBox.requireText} to confirm`} autoFocus
+                onChange={(e) => setConfirmText(e.target.value)} />
+            )}
+            <div className="edit-actions">
+              <button className={"btn-main" + (confirmBox.danger ? " danger-bg" : "")}
+                disabled={confirmBox.requireText ? confirmText.trim().toUpperCase() !== confirmBox.requireText : false}
+                onClick={() => { const fn = confirmBox.onConfirm; setConfirmBox(null); fn(); }}>
+                {confirmBox.confirmLabel}
+              </button>
+              <button className="btn-ghost" onClick={() => setConfirmBox(null)} autoFocus={!confirmBox.requireText}>Go back</button>
+            </div>
           </div>
         </div>
       )}
@@ -977,7 +1128,7 @@ function LaundryApp() {
         </div>
       )}
 
-      <div className={"shell layout" + (printOrder || edit ? " shell-dim" : "")}>
+      <div className={"shell layout" + (printOrder || edit || confirmBox ? " shell-dim" : "")}>
         {/* ---------- sidebar ---------- */}
         <aside className="sidebar no-print">
           <div className="sb-brand">
@@ -1007,13 +1158,22 @@ function LaundryApp() {
         </aside>
 
         <div className="main-col">
-          {toast && <div className="toast">{toast}</div>}
+          <div role="status" aria-live="polite">
+            {toast && <div className="toast">{toast}</div>}
+          </div>
 
           <main className="wrap">
             <div className="page-head no-print">
               <h1>{PAGE_META[tab] ? PAGE_META[tab][0] : ""}</h1>
               <p>{PAGE_META[tab] ? PAGE_META[tab][1] : ""}</p>
             </div>
+
+            {isAdmin && defaultPinsActive && tab !== "team" && (
+              <div className="warn-banner no-print">
+                ⚠️ The demo PINs (1234 / 5678) are still active — anyone who knows them can sign in.
+                <button className="ft-link" onClick={() => setTab("team")}>Change them in the Team tab</button>
+              </div>
+            )}
 
           {/* ================= DASHBOARD ================= */}
           {tab === "dash" && (
@@ -1078,6 +1238,25 @@ function LaundryApp() {
                     );
                   })}
                 </div>
+
+                {dash.owing.length > 0 && (
+                  <div className="panel">
+                    <h2>Collected but still owing</h2>
+                    <p className="muted">Items already released with a balance owing — follow up until it's settled.</p>
+                    {dash.owing.map((o) => (
+                      <div key={o.id} className="dash-row">
+                        <div>
+                          <b>{o.id}</b> · {o.customerName}
+                          <span className="dash-sub">owing {fmt(balanceOf(o))} · collected {o.collectDate}</span>
+                        </div>
+                        <div className="dash-acts">
+                          <a className="wa-mini" target="_blank" rel="noreferrer" href={waTo(o.phone, owingText(o, settings))}>Send reminder</a>
+                          <button className="btn-ghost small" onClick={() => jumpToOrder(o.id)}>Open</button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </section>
           )}
@@ -1207,6 +1386,15 @@ function LaundryApp() {
                   <label>Payment now (optional)
                     <input type="number" min="0" value={payNow.amount} placeholder="Amount received"
                       onChange={(e) => setPayNow({ ...payNow, amount: e.target.value })} />
+                    {total > 0 && (
+                      <span className="amt-chips">
+                        <button type="button" className="amt-chip" onClick={() => setPayNow({ ...payNow, amount: String(total) })}>Full {fmt(total)}</button>
+                        <button type="button" className="amt-chip" onClick={() => setPayNow({ ...payNow, amount: String(Math.ceil(total / 2)) })}>Half {fmt(Math.ceil(total / 2))}</button>
+                      </span>
+                    )}
+                    {parseFloat(payNow.amount) > total && (
+                      <span className="overpay-note">That's more than the total ({fmt(total)}) — is that right?</span>
+                    )}
                   </label>
                   <label>Payment method
                     <select value={payNow.method} onChange={(e) => setPayNow({ ...payNow, method: e.target.value })}>
@@ -1241,7 +1429,13 @@ function LaundryApp() {
                     <div className="ticket-total"><span>Total</span><b>{fmt(total)}</b></div>
                   </div>
                 )}
-                <button className="btn-main w-full" onClick={createOrder}>Create order &amp; print slip</button>
+                {triedCreate && orderProblems().length > 0 && (
+                  <div className="err-box" role="alert">
+                    <b>Before creating this order:</b>
+                    <ul>{orderProblems().map((p, i) => <li key={i}>{p}</li>)}</ul>
+                  </div>
+                )}
+                <button className="btn-main w-full" onClick={() => createOrder()}>Create order &amp; print slip</button>
                 {(cartLines.length > 0 || express || discount || notes || payNow.amount) && (
                   <button className="btn-clear" onClick={clearTicket}>✕ Clear order ticket</button>
                 )}
@@ -1299,8 +1493,22 @@ function LaundryApp() {
                     {!o.cancelled && !isCancelling && (
                       <div className="ao-actions">
                         {idx < STATUSES.length - 1 ? (
-                          <button className="btn-main small" onClick={() => advanceStatus(o.id)}>Mark “{STATUSES[idx + 1]}”</button>
+                          <button className="btn-main small" onClick={() => {
+                            const bal = balanceOf(o);
+                            if (STATUSES[idx + 1] === DONE_STATUS && bal > 0) {
+                              askConfirm({
+                                title: "Balance still owed",
+                                body: `${fmt(bal)} is still owed on ${o.id}. Record the payment below first, or release the items with the balance owing.`,
+                                confirmLabel: "Release with debt",
+                                danger: true,
+                                onConfirm: () => advanceStatus(o.id),
+                              });
+                            } else advanceStatus(o.id);
+                          }}>Mark “{STATUSES[idx + 1]}”</button>
                         ) : <span className="chip pay-paid">Completed</span>}
+                        {canStepBack(o) && (
+                          <button className="btn-ghost small" title="Undo the last status change" onClick={() => stepBackStatus(o.id)}>↩ Step back</button>
+                        )}
                         <button className="btn-ghost small" onClick={() => setPrinting({ type: "slip", orderId: o.id })}>🧾 Slip</button>
                         {o.payments.length > 0 && (
                           <button className="btn-ghost small" onClick={() => setPrinting({ type: "receipt", orderId: o.id })}>🧾 Receipt</button>
@@ -1320,22 +1528,31 @@ function LaundryApp() {
                     {isCancelling && (
                       <div className="cancel-form">
                         <input value={cancelDraft.reason} placeholder="Reason for cancelling (required)"
+                          aria-label="Reason for cancelling"
                           onChange={(e) => setCancelDraft({ ...cancelDraft, reason: e.target.value })} />
                         <button className="btn-main small danger-bg" onClick={confirmCancel}>Confirm cancel</button>
                         <button className="btn-ghost small" onClick={() => setCancelDraft(null)}>Keep order</button>
+                        {paidOf(o) > 0 && (
+                          <span className="overpay-note">{fmt(paidOf(o))} has been paid on this order. If you refund it, also reverse the payment(s) so the books stay right — cancelled orders don't count in sales.</span>
+                        )}
                       </div>
                     )}
 
                     {!o.cancelled && ps !== "paid" && !isCancelling && (
                       <div className="pay-form">
                         <input type="number" min="0" placeholder={`Amount (due ${fmt(balanceOf(o))})`}
+                          aria-label={`Payment amount for ${o.id}, due ${fmt(balanceOf(o))}`}
                           value={draft.amount}
                           onChange={(e) => setPayDraft((d) => ({ ...d, [o.id]: { ...draft, amount: e.target.value } }))} />
-                        <select value={draft.method}
+                        <button type="button" className="amt-chip" onClick={() => setPayDraft((d) => ({ ...d, [o.id]: { ...draft, amount: String(balanceOf(o)) } }))}>Full {fmt(balanceOf(o))}</button>
+                        <select value={draft.method} aria-label="Payment method"
                           onChange={(e) => setPayDraft((d) => ({ ...d, [o.id]: { ...draft, method: e.target.value } }))}>
                           {settings.payMethods.map((m) => <option key={m}>{m}</option>)}
                         </select>
                         <button className="btn-ghost small" onClick={() => recordPayment(o.id)}>Record payment &amp; receipt</button>
+                        {parseFloat(draft.amount) > balanceOf(o) && (
+                          <span className="overpay-note">That's more than the balance ({fmt(balanceOf(o))}) — is that right?</span>
+                        )}
                       </div>
                     )}
 
@@ -1451,7 +1668,7 @@ function LaundryApp() {
                       ))}
                     </tbody>
                   </table>
-                  {report.cancelled > 0 && <p className="tiny left">{report.cancelled} cancelled order{report.cancelled > 1 ? "s" : ""} in this period (excluded from sales).</p>}
+                  {report.cancelled > 0 && <p className="tiny left">{report.cancelled} cancelled order{report.cancelled > 1 ? "s" : ""} in this period — cancelled orders and their payments are excluded from these figures.</p>}
                 </div>
 
                 <div className="panel">
@@ -1553,20 +1770,45 @@ function LaundryApp() {
             <section className="panel">
               <h2>Team &amp; PINs</h2>
               <p className="muted">Each person signs in with their own PIN, and everything they do is recorded under their name. Staff PINs give daily-operations access; Owner PINs unlock everything.</p>
+              {defaultPinsActive && (
+                <div className="warn-banner">⚠️ The demo PINs (1234 / 5678) are still active. Use ✏️ Edit to give each person their own secret PIN before staff start using the app.</div>
+              )}
+              <div className="edit-add">
+                <button className="btn-ghost small" onClick={() => setShowPins((s) => !s)}>{showPins ? "🙈 Hide PINs" : "👁 Show PINs"}</button>
+              </div>
               <table className="table">
                 <thead><tr><th>Name</th><th>Role</th><th>PIN</th><th></th></tr></thead>
                 <tbody>
-                  {users.map((u) => (
-                    <tr key={u.id}>
-                      <td>{u.name}{u.id === currentUserId ? " (you)" : ""}</td>
-                      <td><span className={"chip " + (u.role === "admin" ? "role-admin" : "role-staff")}>{u.role === "admin" ? "Owner" : "Staff"}</span></td>
-                      <td className="pin-cell">{u.pin}</td>
-                      <td>
-                        <button className="btn-ghost small danger" onClick={() => removeUser(u.id)}
-                          disabled={u.id === currentUserId}>Remove</button>
-                      </td>
-                    </tr>
-                  ))}
+                  {users.map((u) => {
+                    const editing = userEdit && userEdit.id === u.id;
+                    return editing ? (
+                      <tr key={u.id} className="cust-edit-row">
+                        <td><input value={userEdit.name} aria-label="Name" onChange={(e) => setUserEdit({ ...userEdit, name: e.target.value })} /></td>
+                        <td><span className={"chip " + (u.role === "admin" ? "role-admin" : "role-staff")}>{u.role === "admin" ? "Owner" : "Staff"}</span></td>
+                        <td><input value={userEdit.pin} inputMode="numeric" maxLength={6} aria-label="New PIN (4–6 digits)" className="pin-cell"
+                          onChange={(e) => setUserEdit({ ...userEdit, pin: e.target.value.replace(/\D/g, "") })} /></td>
+                        <td>
+                          <div className="dash-acts">
+                            <button className="btn-main small" onClick={saveUserEdit}>Save</button>
+                            <button className="btn-ghost small" onClick={() => setUserEdit(null)}>Discard</button>
+                          </div>
+                        </td>
+                      </tr>
+                    ) : (
+                      <tr key={u.id}>
+                        <td>{u.name}{u.id === currentUserId ? " (you)" : ""}</td>
+                        <td><span className={"chip " + (u.role === "admin" ? "role-admin" : "role-staff")}>{u.role === "admin" ? "Owner" : "Staff"}</span></td>
+                        <td className="pin-cell">{showPins ? u.pin : "••••"}</td>
+                        <td>
+                          <div className="dash-acts">
+                            <button className="btn-ghost small" onClick={() => setUserEdit({ id: u.id, name: u.name, pin: u.pin })}>✏️ Edit</button>
+                            <button className="btn-ghost small danger" onClick={() => removeUser(u.id)}
+                              disabled={u.id === currentUserId}>Remove</button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
               <div className="svc-cat">Add a person</div>
@@ -1582,7 +1824,7 @@ function LaundryApp() {
                 </select>
                 <button className="btn-main small" onClick={addUser}>Add</button>
               </div>
-              <p className="tiny left">Tip: to change someone's PIN, remove them and add them again with the new PIN. Every PIN must be unique — it's how the app knows who signed in.</p>
+              <p className="tiny left">Tip: use ✏️ Edit to change a name or PIN. Every PIN must be unique — it's how the app knows who signed in.</p>
             </section>
           )}
           {/* ================= SETTINGS (owner only) ================= */}
@@ -2070,6 +2312,19 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
 
 /* ---------- edit overlay ---------- */
 .edit-panel { background: #fff; max-width: 560px; margin: 0 auto; border-radius: 14px; padding: 22px; box-shadow: 0 20px 60px rgba(0,0,0,0.35); animation: popIn 0.25s ease both; }
+.confirm-panel { max-width: 440px; margin-top: 10vh; }
+.confirm-panel input { margin: 4px 0 14px; }
+
+/* ---------- inline validation, quick amounts, warnings ---------- */
+.err-box { background: #FEF2F2; border: 1px solid #FECACA; color: #B91C1C; border-radius: 10px; padding: 10px 14px; font-size: 13px; margin-top: 12px; text-align: left; }
+.err-box ul { margin: 6px 0 0; padding-left: 18px; }
+.err-box li { margin: 3px 0; }
+.amt-chips { display: flex; gap: 6px; margin-top: 6px; }
+.amt-chip { border: 1px solid #BFDBFE; background: var(--blue-soft); color: var(--blue-dark); font: inherit; font-size: 12.5px; font-weight: 700; padding: 6px 12px; border-radius: 999px; cursor: pointer; white-space: nowrap; transition: background 0.12s ease; }
+.amt-chip:hover { background: #DBEAFE; }
+.overpay-note { flex-basis: 100%; font-size: 12.5px; color: var(--amber); font-weight: 600; }
+.warn-banner { background: #FFFBEB; border: 1px solid #FDE68A; color: #92400E; border-radius: 10px; padding: 10px 14px; font-size: 13.5px; margin-bottom: 14px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.warn-banner .ft-link { color: #92400E; }
 .edit-adders { display: grid; gap: 8px; margin: 12px 0 4px; }
 .edit-add { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin: 6px 0; }
 .edit-add input, .edit-add select { flex: 1; min-width: 140px; padding: 8px 10px; font-size: 13.5px; }
